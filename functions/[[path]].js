@@ -1,75 +1,68 @@
-// ============================================================
-//  ডিবাগ-বান্ধব ও স্থিতিশীল স্ট্রিম প্রক্সি (Pages Functions)
-// ============================================================
+// ========================================
+//  সিম্পল ও কার্যকরী স্ট্রিম প্রক্সি (Pages Functions)
+// ========================================
 
-const CONFIG_URL = 'https://raw.githubusercontent.com/dhaka-livestream/Toffee-serverall/refs/heads/main/channels.json';
+const CONFIG_URL = 'https://raw.githubusercontent.com/your-username/your-repo/main/channels.json';
 const SECRET_PARAM = 'tlmony.netlify.app';
 const SECRET_VALUE = 'sadullapur';
 
-// ---------- ক্যাশ ব্যবস্থাপনা ----------
-let cache = { data: null, timestamp: 0 };
-const CACHE_TTL = 60000; // ১ মিনিট
+let configCache = null;
+let cacheTime = 0;
+const CACHE_TTL = 60000;
 
-// ---------- কনফিগ লোড (GitHub থেকে) ----------
-async function getChannelConfig(channelId) {
-  try {
-    const now = Date.now();
-    if (cache.data && now - cache.timestamp < CACHE_TTL) {
-      const channel = cache.data.channels.find(c => c.id === channelId);
-      if (channel) return channel;
-    }
-    
-    const resp = await fetch(CONFIG_URL);
-    if (!resp.ok) throw new Error(`Config fetch failed: ${resp.status}`);
-    const data = await resp.json();
-    cache.data = data;
-    cache.timestamp = now;
-    
-    return data.channels.find(c => c.id === channelId);
-  } catch (error) {
-    console.error('Config load error:', error);
-    throw error;
+async function getConfig() {
+  const now = Date.now();
+  if (configCache && now - cacheTime < CACHE_TTL) {
+    return configCache;
   }
+  const resp = await fetch(CONFIG_URL);
+  if (!resp.ok) throw new Error('Config fetch failed');
+  configCache = await resp.json();
+  cacheTime = now;
+  return configCache;
+}
+
+async function getChannel(id) {
+  const config = await getConfig();
+  return config.channels.find(c => c.id === id);
 }
 
 // ---------- প্লেলিস্ট রিরাইট (শুধু URL প্রতিস্থাপন) ----------
-function rewritePlaylist(content, channelId, baseUrl, baseChannelUrl) {
-  try {
-    const lines = content.split('\n');
-    return lines.map(line => {
-      if (line.startsWith('#') || !line.trim()) return line;
+function rewriteUrls(content, channelId, baseUrl, baseChannelUrl) {
+  const lines = content.split('\n');
+  const rewritten = lines.map(line => {
+    // মন্তব্য বা খালি লাইন অপরিবর্তিত রাখুন
+    if (line.trim().startsWith('#') || !line.trim()) return line;
 
-      // URI="..." (DRM কী বা ম্যাপ)
-      if (line.includes('URI="')) {
-        return line.replace(/URI="([^"]+)"/g, (_, url) => {
-          try {
-            const resolved = new URL(url, baseChannelUrl).href;
-            return `URI="${baseUrl}/raw/${channelId}?url=${encodeURIComponent(resolved)}&${SECRET_PARAM}=${SECRET_VALUE}"`;
-          } catch {
-            return line;
-          }
-        });
-      }
-
-      // সাধারণ .ts বা .m3u8 লিংক
-      try {
-        const resolved = new URL(line.trim(), baseChannelUrl).href;
-        if (resolved.includes('.ts') || resolved.includes('.m3u8')) {
-          return `${baseUrl}/raw/${channelId}?url=${encodeURIComponent(resolved)}&${SECRET_PARAM}=${SECRET_VALUE}`;
+    // URI="..." হ্যান্ডেল (DRM কী বা ম্যাপ)
+    if (line.includes('URI="')) {
+      return line.replace(/URI="([^"]+)"/g, (_, url) => {
+        try {
+          const resolved = new URL(url, baseChannelUrl).href;
+          return `URI="${baseUrl}/raw/${channelId}?url=${encodeURIComponent(resolved)}&${SECRET_PARAM}=${SECRET_VALUE}"`;
+        } catch {
+          return line;
         }
-        return line;
-      } catch {
-        return line;
+      });
+    }
+
+    // সাধারণ ইউআরএল
+    try {
+      const resolved = new URL(line.trim(), baseChannelUrl).href;
+      // শুধুমাত্র .ts বা .m3u8 ফাইলগুলো প্রক্সি করুন
+      if (resolved.match(/\.(ts|m3u8)(\?.*)?$/i)) {
+        return `${baseUrl}/raw/${channelId}?url=${encodeURIComponent(resolved)}&${SECRET_PARAM}=${SECRET_VALUE}`;
       }
-    }).join('\n');
-  } catch (error) {
-    console.error('Rewrite error:', error);
-    return content; // error হলে original content return করুন
-  }
+      return line;
+    } catch {
+      return line;
+    }
+  });
+  return rewritten.join('\n');
 }
 
 // ============================================================
-//   মূল হ্যান্ডলার (স্ট্রিমিং + ক্যাশিং + লো-লেটেন্সি)
+//  মূল হ্যান্ডলার
 // ============================================================
 export async function onRequest(context) {
   try {
@@ -78,15 +71,12 @@ export async function onRequest(context) {
     const path = url.pathname;
     const baseUrl = `${url.protocol}//${url.hostname}`;
 
-    // ----- সিক্রেট প্যারামিটার চেক (সব রিকোয়েস্টে) -----
+    // ----- সিক্রেট প্যারামিটার চেক -----
     if (url.searchParams.get(SECRET_PARAM) !== SECRET_VALUE) {
-      return new Response('Forbidden: Invalid or missing secret parameter', { 
-        status: 403,
-        headers: { 'Content-Type': 'text/plain' }
-      });
+      return new Response('Forbidden', { status: 403 });
     }
 
-    // ----- 1. প্লেলিস্ট এন্ডপয়েন্ট (/play/xxx.m3u8) -----
+    // ----- 1. প্লেলিস্ট (/play/xxx.m3u8) -----
     let channelId = null;
     const m3u8Match = path.match(/^\/play\/(.+)\.m3u8$/);
     if (m3u8Match) {
@@ -97,16 +87,15 @@ export async function onRequest(context) {
     }
 
     if (channelId) {
-      const channel = await getChannelConfig(channelId);
+      const channel = await getChannel(channelId);
       if (!channel) {
-        return new Response(`Channel "${channelId}" not found`, { status: 404 });
+        return new Response(`Channel not found: ${channelId}`, { status: 404 });
       }
 
       // হেডার তৈরি
       const headers = new Headers();
       headers.set('User-Agent', channel.user_agent || 'okhttp/5.1.0');
       if (channel.cookie) headers.set('Cookie', channel.cookie);
-      headers.set('Accept-Encoding', 'gzip, deflate, br');
 
       // মূল প্লেলিস্ট ফেচ
       const originResp = await fetch(channel.url, { headers });
@@ -114,39 +103,40 @@ export async function onRequest(context) {
         return new Response(`Upstream error: ${originResp.status}`, { status: 502 });
       }
 
+      const contentType = originResp.headers.get('Content-Type') || 'application/vnd.apple.mpegurl';
       const bodyText = await originResp.text();
-      const rewritten = rewritePlaylist(bodyText, channelId, baseUrl, channel.url);
+
+      // ইউআরএল রিরাইট
+      const rewritten = rewriteUrls(bodyText, channelId, baseUrl, channel.url);
 
       return new Response(rewritten, {
         status: 200,
         headers: {
-          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Content-Type': contentType,
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Cache-Control': 'no-cache',
         },
       });
     }
 
-    // ----- 2. সেগমেন্ট প্রক্সি (/raw/xxx?url=...&secret=...) -----
+    // ----- 2. সেগমেন্ট প্রক্সি (/raw/xxx?url=...) -----
     if (path.startsWith('/raw/')) {
       const parts = path.split('/');
       const channelId = parts[2];
       const targetUrl = url.searchParams.get('url');
       if (!channelId || !targetUrl) {
-        return new Response('Missing channelId or url parameter', { status: 400 });
+        return new Response('Missing parameters', { status: 400 });
       }
 
-      const channel = await getChannelConfig(channelId);
+      const channel = await getChannel(channelId);
       if (!channel) {
-        return new Response(`Channel "${channelId}" not found`, { status: 404 });
+        return new Response(`Channel not found: ${channelId}`, { status: 404 });
       }
 
       const headers = new Headers();
       headers.set('User-Agent', channel.user_agent || 'okhttp/5.1.0');
       if (channel.cookie) headers.set('Cookie', channel.cookie);
-      headers.set('Accept-Encoding', 'gzip, deflate, br');
 
-      // সেগমেন্ট ফেচ
       const segmentResp = await fetch(decodeURIComponent(targetUrl), { headers });
       if (!segmentResp.ok) {
         return new Response(`Segment error: ${segmentResp.status}`, { status: 502 });
@@ -154,42 +144,35 @@ export async function onRequest(context) {
 
       const contentType = segmentResp.headers.get('Content-Type') || '';
 
-      // যদি সাব-প্লেলিস্ট হয় (ভ্যারিয়েন্ট), তাহলে সেটাও রিরাইট করতে হবে
+      // যদি সাব-প্লেলিস্ট হয়, রিরাইট করে দিতে হবে
       if (contentType.includes('mpegurl') || contentType.includes('vnd.apple.mpegurl')) {
         const body = await segmentResp.text();
-        const rewritten = rewritePlaylist(body, channelId, baseUrl, decodeURIComponent(targetUrl));
+        const rewritten = rewriteUrls(body, channelId, baseUrl, decodeURIComponent(targetUrl));
         return new Response(rewritten, {
           status: 200,
           headers: {
             'Content-Type': contentType,
             'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Cache-Control': 'no-cache',
           },
         });
       }
 
-      // ভিডিও সেগমেন্ট (.ts) – সরাসরি পাস
+      // .ts ফাইল – সরাসরি পাস
       return new Response(segmentResp.body, {
         status: segmentResp.status,
         headers: {
           'Content-Type': contentType || 'video/MP2T',
           'Access-Control-Allow-Origin': '*',
-          'Cache-Control': 'public, max-age=3600, stale-while-revalidate=86400',
+          'Cache-Control': 'public, max-age=3600',
         },
       });
     }
 
-    return new Response('Not Found. Use /play/channel_id.m3u8?tlmony.netlify.app=sadullapur', { 
-      status: 404,
-      headers: { 'Content-Type': 'text/plain' }
-    });
+    return new Response('Not Found', { status: 404 });
 
   } catch (error) {
-    // সব ধরণের error ধরা এবং লগ করা
-    console.error('Unhandled error:', error);
-    return new Response(`Internal Server Error: ${error.message}`, { 
-      status: 500,
-      headers: { 'Content-Type': 'text/plain' }
-    });
+    console.error('Error:', error);
+    return new Response(`Error: ${error.message}`, { status: 500 });
   }
 }
