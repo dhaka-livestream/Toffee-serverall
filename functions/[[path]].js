@@ -2,7 +2,7 @@
 //  ডিবাগ-বান্ধব ও স্থিতিশীল স্ট্রিম প্রক্সি (Pages Functions)
 // ============================================================
 
-const CONFIG_URL = 'https://raw.githubusercontent.com/your-username/your-repo/main/channels.json';
+const CONFIG_URL = 'https://raw.githubusercontent.com/dhaka-livestream/Toffee-serverall/refs/heads/main/channels.json';
 const SECRET_PARAM = 'tlmony.netlify.app';
 const SECRET_VALUE = 'sadullapur';
 
